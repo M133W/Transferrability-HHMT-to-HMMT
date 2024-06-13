@@ -1,148 +1,148 @@
-library(dplyr)
-library(ggplot2)
-
-
-# Définir le chemin du dossier
-folder_path <- "/Users/wenjiehuang/Desktop/LyonLumiere2/M2/StageM2/Data/DataComp"
-# Lister tous les fichiers CSV
-csv_files <- list.files(folder_path, pattern = "\\.csv$", full.names = TRUE)
-
-# Initialiser un dataframe vide
-comp_data <- data.frame()
-
-# Définir le taux d'échantillonnage d'origine et le taux d'échantillonnage cible
-original_sampling_rate <- 0.002
-target_sampling_rate <- 0.05
-
-# Calculer le nombre de lignes à conserver
-rows_to_keep <- round(target_sampling_rate / original_sampling_rate)
-
-# Parcourir chaque fichier CSV
-for (file in csv_files) {
-  # Extraire le numéro de sujet et le scénario expérimental du nom de fichier
-  file_name <- basename(file)
-  subject_number <- strsplit(file_name, "_")[[1]][1]
-  scenario <- strsplit(file_name, "_")[[1]][2]
-  
-  # Lire le fichier CSV
-  csv_data <- read.csv(file, header = TRUE, sep = ";", dec = ",")
-  
-  # Ajouter des colonnes subject_number et session
-  csv_data$Subject <- subject_number
-  csv_data$Session <- scenario
-  
-  # Échantillonner les données
-  sampled_data <- csv_data[seq(1, nrow(csv_data), by = rows_to_keep), ]
-  
-  # S'assurer que TypeCond et NbTrial sont des types appropriés
-  sampled_data$TypeCond <- as.character(sampled_data$TypeCond)
-  sampled_data$NbTrial <- as.numeric(sampled_data$NbTrial)
-  
-  # Ajouter TrialOrder en fonction du scénario expérimental et du numéro de sujet
-  sampled_data <- sampled_data %>%
-    group_by(Subject, Session) %>%
-    arrange(Time) %>%
-    mutate(
-      TrialOrder = 1 + cumsum(if_else(TypeCond != lag(TypeCond, default = first(TypeCond)) |
-                                        NbTrial != lag(NbTrial, default = first(NbTrial)), 1, 0))
-    )%>% ungroup()
-  # mutate(
-  #   TrialOrder = cumsum(c(TRUE, lag(TypeCond, default = first(TypeCond)) != TypeCond |
-  #                           lag(NbTrial, default = first(NbTrial)) != NbTrial))
-  # )
-  
-  # Ajouter les données au dataframe total
-  comp_data <- bind_rows(comp_data, sampled_data)
-}
-
-# Remplacer toutes les valeurs de 2 par 0,5 dans BinaryChoice
-comp_data <- comp_data %>%
-  mutate(BinaryChoice = ifelse(BinaryChoice == 2, 0.5, BinaryChoice))
-
-
-# Effectuer d'abord la conversion de mappage
-comp_data_modified <- comp_data %>%
-  mutate(
-    BinaryChoice = 2 * as.numeric(BinaryChoice) - 1,
-    JoystickYAxis = 2 * JoystickYAxis - 1
-  )
-
-View(comp_data_modified)
-
-
-comp_data_modified <- comp_data_modified %>%
-  group_by(Subject, Session, TrialOrder) %>%
-  mutate(
-    # Obtenir la dernière valeur de BinaryChoice pour chaque bloc de données
-    last_binary_choice = last(BinaryChoice),
-    last_RT = last(RT)
-  ) %>%
-  filter(last_binary_choice != 0)
-
-
-####################### confirmer la corrélation entre joystick et choix binaire ####################
-########################### comparer la corrélation entre les sessions ###############################
-
-# Tracer la courbe de régression linéaire
-ggplot(comp_data_modified, aes(x = JoystickYAxis, y = as.numeric(last_binary_choice), color = Session)) +
-  geom_smooth(method = "lm", se = TRUE) + # Tracer la courbe de régression linéaire et l'intervalle de confiance
-  labs(title = "Relation entre JoystickYAxis et BinaryChoice par session",
-       x = "Axe Y du Joystick",
-       y = "Choix Binaire") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-
-# Ajuster le modèle linéaire combiné avec le terme d'interaction
-combined_lm <- lm(as.numeric(last_binary_choice) ~ JoystickYAxis * Session, data = comp_data_modified)
-# Résumé du modèle combiné
-summary(combined_lm)
-# ANOVA pour tester la signification de l'interaction
-anova(combined_lm)
-
-######################## coefficient de corrélation de Kendall ######################
-
-# Définir la fonction pour calculer tau de Kendall et la p-value
-calculate_kendall_tau <- function(data) {
-  result <- cor.test(data$JoystickYAxis, as.numeric(data$last_binary_choice), method = "kendall")
-  return(data.frame(kendall_tau = result$estimate, p_value = result$p.value))
-}
-
-# Calculer tau de Kendall et la p-value pour chaque session
-session_stats <- comp_data_modified %>%
-  group_by(Session) %>%
-  do(calculate_kendall_tau(.))
-
-print(session_stats)
-
-######################### Modèle à effets mixtes sur RT~BinaryChoice ############
-
-library(lme4)
-
-# Modèle à effets mixtes : relation entre RT et BinaryChoice, considérant le sujet comme un effet aléatoire
-rt_mixed_model <- lmer(last_RT ~ last_binary_choice * Session + (1|Subject), data = comp_data_modified)
-summary(rt_mixed_model)
-
-
-### RT par BinaryChoice à travers les sessions
-
-summary_data <- comp_data_modified %>%
-  group_by(Session, last_binary_choice) %>%
-  summarise(
-    mean_RT = mean(last_RT, na.rm = TRUE),
-    sd_RT = sd(last_RT, na.rm = TRUE),
-    .groups = 'drop'
-  )
-
-# Tracer un diagramme en barres des moyennes avec barres d'erreur
-ggplot(summary_data, aes(x = as.factor(last_binary_choice), y = mean_RT, fill = Session)) +
-  geom_bar(stat = "identity", position = position_dodge(width = 0.9), width = 0.8) +
-  geom_errorbar(aes(ymin = mean_RT - sd_RT, ymax = mean_RT + sd_RT),
-                width = 0.2, position = position_dodge(width = 0.9)) +
-  labs(title = "Temps de Réaction Moyen par Choix Binaire",
-       x = "Choix Binaire", y = "Temps de Réaction Moyen") +
-  # scale_fill_brewer(palette = "Set1") +
-  theme_minimal()
+# library(dplyr)
+# library(ggplot2)
+# 
+# 
+# # Définir le chemin du dossier
+# folder_path <- "/Users/wenjiehuang/Desktop/LyonLumiere2/M2/StageM2/Data/DataComp"
+# # Lister tous les fichiers CSV
+# csv_files <- list.files(folder_path, pattern = "\\.csv$", full.names = TRUE)
+# 
+# # Initialiser un dataframe vide
+# comp_data <- data.frame()
+# 
+# # Définir le taux d'échantillonnage d'origine et le taux d'échantillonnage cible
+# original_sampling_rate <- 0.002
+# target_sampling_rate <- 0.05
+# 
+# # Calculer le nombre de lignes à conserver
+# rows_to_keep <- round(target_sampling_rate / original_sampling_rate)
+# 
+# # Parcourir chaque fichier CSV
+# for (file in csv_files) {
+#   # Extraire le numéro de sujet et le scénario expérimental du nom de fichier
+#   file_name <- basename(file)
+#   subject_number <- strsplit(file_name, "_")[[1]][1]
+#   scenario <- strsplit(file_name, "_")[[1]][2]
+#   
+#   # Lire le fichier CSV
+#   csv_data <- read.csv(file, header = TRUE, sep = ";", dec = ",")
+#   
+#   # Ajouter des colonnes subject_number et session
+#   csv_data$Subject <- subject_number
+#   csv_data$Session <- scenario
+#   
+#   # Échantillonner les données
+#   sampled_data <- csv_data[seq(1, nrow(csv_data), by = rows_to_keep), ]
+#   
+#   # S'assurer que TypeCond et NbTrial sont des types appropriés
+#   sampled_data$TypeCond <- as.character(sampled_data$TypeCond)
+#   sampled_data$NbTrial <- as.numeric(sampled_data$NbTrial)
+#   
+#   # Ajouter TrialOrder en fonction du scénario expérimental et du numéro de sujet
+#   sampled_data <- sampled_data %>%
+#     group_by(Subject, Session) %>%
+#     arrange(Time) %>%
+#     mutate(
+#       TrialOrder = 1 + cumsum(if_else(TypeCond != lag(TypeCond, default = first(TypeCond)) |
+#                                         NbTrial != lag(NbTrial, default = first(NbTrial)), 1, 0))
+#     )%>% ungroup()
+#   # mutate(
+#   #   TrialOrder = cumsum(c(TRUE, lag(TypeCond, default = first(TypeCond)) != TypeCond |
+#   #                           lag(NbTrial, default = first(NbTrial)) != NbTrial))
+#   # )
+#   
+#   # Ajouter les données au dataframe total
+#   comp_data <- bind_rows(comp_data, sampled_data)
+# }
+# 
+# # Remplacer toutes les valeurs de 2 par 0,5 dans BinaryChoice
+# comp_data <- comp_data %>%
+#   mutate(BinaryChoice = ifelse(BinaryChoice == 2, 0.5, BinaryChoice))
+# 
+# 
+# # Effectuer d'abord la conversion de mappage
+# comp_data_modified <- comp_data %>%
+#   mutate(
+#     BinaryChoice = 2 * as.numeric(BinaryChoice) - 1,
+#     JoystickYAxis = 2 * JoystickYAxis - 1
+#   )
+# 
+# View(comp_data_modified)
+# 
+# 
+# comp_data_modified <- comp_data_modified %>%
+#   group_by(Subject, Session, TrialOrder) %>%
+#   mutate(
+#     # Obtenir la dernière valeur de BinaryChoice pour chaque bloc de données
+#     last_binary_choice = last(BinaryChoice),
+#     last_RT = last(RT)
+#   ) %>%
+#   filter(last_binary_choice != 0)
+# 
+# 
+# ####################### confirmer la corrélation entre joystick et choix binaire ####################
+# ########################### comparer la corrélation entre les sessions ###############################
+# 
+# # Tracer la courbe de régression linéaire
+# ggplot(comp_data_modified, aes(x = JoystickYAxis, y = as.numeric(last_binary_choice), color = Session)) +
+#   geom_smooth(method = "lm", se = TRUE) + # Tracer la courbe de régression linéaire et l'intervalle de confiance
+#   labs(title = "Relation entre JoystickYAxis et BinaryChoice par session",
+#        x = "Axe Y du Joystick",
+#        y = "Choix Binaire") +
+#   theme_minimal() +
+#   theme(legend.position = "bottom")
+# 
+# 
+# # Ajuster le modèle linéaire combiné avec le terme d'interaction
+# combined_lm <- lm(as.numeric(last_binary_choice) ~ JoystickYAxis * Session, data = comp_data_modified)
+# # Résumé du modèle combiné
+# summary(combined_lm)
+# # ANOVA pour tester la signification de l'interaction
+# anova(combined_lm)
+# 
+# ######################## coefficient de corrélation de Kendall ######################
+# 
+# # Définir la fonction pour calculer tau de Kendall et la p-value
+# calculate_kendall_tau <- function(data) {
+#   result <- cor.test(data$JoystickYAxis, as.numeric(data$last_binary_choice), method = "kendall")
+#   return(data.frame(kendall_tau = result$estimate, p_value = result$p.value))
+# }
+# 
+# # Calculer tau de Kendall et la p-value pour chaque session
+# session_stats <- comp_data_modified %>%
+#   group_by(Session) %>%
+#   do(calculate_kendall_tau(.))
+# 
+# print(session_stats)
+# 
+# ######################### Modèle à effets mixtes sur RT~BinaryChoice ############
+# 
+# library(lme4)
+# 
+# # Modèle à effets mixtes : relation entre RT et BinaryChoice, considérant le sujet comme un effet aléatoire
+# rt_mixed_model <- lmer(last_RT ~ last_binary_choice * Session + (1|Subject), data = comp_data_modified)
+# summary(rt_mixed_model)
+# 
+# 
+# ### RT par BinaryChoice à travers les sessions
+# 
+# summary_data <- comp_data_modified %>%
+#   group_by(Session, last_binary_choice) %>%
+#   summarise(
+#     mean_RT = mean(last_RT, na.rm = TRUE),
+#     sd_RT = sd(last_RT, na.rm = TRUE),
+#     .groups = 'drop'
+#   )
+# 
+# # Tracer un diagramme en barres des moyennes avec barres d'erreur
+# ggplot(summary_data, aes(x = as.factor(last_binary_choice), y = mean_RT, fill = Session)) +
+#   geom_bar(stat = "identity", position = position_dodge(width = 0.9), width = 0.8) +
+#   geom_errorbar(aes(ymin = mean_RT - sd_RT, ymax = mean_RT + sd_RT),
+#                 width = 0.2, position = position_dodge(width = 0.9)) +
+#   labs(title = "Temps de Réaction Moyen par Choix Binaire",
+#        x = "Choix Binaire", y = "Temps de Réaction Moyen") +
+#   # scale_fill_brewer(palette = "Set1") +
+#   theme_minimal()
 
 
 ############# âge des participants ###########
